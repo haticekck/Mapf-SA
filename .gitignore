@@ -3,3 +3,9 @@ __pycache__/
 venv/
 .idea/
 .vscode/
+data/scen-even-maze/
+metrics_plots_maze/
+metrics_plots_maze_ai/
+metrics_plots_maze_dijkstra/
+metrics_plots_maze_early_stopping/
+old_training_data/

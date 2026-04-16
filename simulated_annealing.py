@@ -3,6 +3,8 @@ import math
 import copy
 from typing import List, Tuple, Set
 from a_star import AStarPathFinder
+from dijkstra import DijkstraPathFinder
+from ai_pathfinder import AIPathFinder
 
 
 class SimulatedAnnealingMAPF:
@@ -11,12 +13,15 @@ class SimulatedAnnealingMAPF:
                  cooling_rate: float = 0.995,
                  min_temp: float = 1.0,
                  conflict_penalty: float = 1000.0,
-                 iterations_per_temp: int = 100):
+                 iterations_per_temp: int = 100,
+                 enable_adaptive_stopping: bool = True):
 
         self.grid = grid
         self.height = len(grid)
         self.width = len(grid[0]) if grid else 0
-        self.pathfinder = AStarPathFinder(grid)
+        #self.pathfinder = AStarPathFinder(grid)
+        #self.pathfinder = DijkstraPathFinder(grid)
+        self.pathfinder = AIPathFinder(grid, model_path="models/ai_pathfinder.pth")
         
         # SA parametreleri
         self.initial_temp = initial_temp
@@ -24,6 +29,7 @@ class SimulatedAnnealingMAPF:
         self.min_temp = min_temp
         self.conflict_penalty = conflict_penalty
         self.iterations_per_temp = iterations_per_temp
+        self.enable_adaptive_stopping = enable_adaptive_stopping
         
     def calculate_cost(self, paths: List[List[Tuple[int, int]]]) -> float:        
         # Maliyet = Toplam yol uzunluğu + Çakışma sayısı * ceza
@@ -160,7 +166,7 @@ class SimulatedAnnealingMAPF:
         
         elif strategy == 'wait_action':
             # Rastgele bir noktada bekle hareketi ekleme
-            if random.random() < 0.5 and len(path) > 2:
+            if random.random() > 0.25 and len(path) > 2:
                 # Bekleme ekleme
                 insert_idx = random.randint(1, len(path) - 1)
                 wait_pos = path[insert_idx]
@@ -173,13 +179,12 @@ class SimulatedAnnealingMAPF:
                 new_path += path[insert_idx:]
 
                 neighbor[agent_idx] = new_path
-            else:
+            elif random.random() < 0.25 and len(path) > 2:
                 # Ardışık aynı pozisyonları bul ve birini çıkar
-                if random.random() < 0.05:
-                    for i in range(len(path) - 1):
-                        if path[i] == path[i + 1]:
-                            neighbor[agent_idx] = path[:i] + path[i + 1:]
-                            break
+                for i in range(len(path) - 1):
+                    if path[i] == path[i + 1]:
+                        neighbor[agent_idx] = path[:i] + path[i + 1:]
+                        break
         
         """elif strategy == 'full_replan':
             # Tüm yolu yeniden planla
@@ -191,9 +196,58 @@ class SimulatedAnnealingMAPF:
         
         return neighbor
     
+    def check_convergence(self, cost_history: List[float], window_size: int = 100) -> bool:
+        if len(cost_history) < window_size:
+            return False
+        
+        recent_costs = cost_history[-window_size:]
+
+        mean_cost = sum(recent_costs) / window_size
+        std_cost = (sum((c - mean_cost) ** 2 for c in recent_costs) / len(recent_costs)) ** 0.5
+
+        cv = std_cost / mean_cost if mean_cost > 0 else 0
+        if cv < 0.001:  # Coefficient of Variation threshold
+            return True
+        
+        first_half = sum(recent_costs[:window_size // 2]) / (window_size // 2)
+        second_half = ( sum(recent_costs[window_size // 2:]) / (window_size // 2) )
+        improvment = (first_half - second_half) / first_half if first_half > 0 else 0
+        if improvment < 0.001:  # İyileşme oranı threshold
+            return True
+
+        return False
+    
+    def adaptive_early_stopping_check(self,
+                                      conflicts: int,
+                                      temperature: float,
+                                      cost_history: List[float]) -> Tuple[bool, str]:
+        """
+        Adaptive early stopping: Farklı kriterlere göre durma
+        
+        Returns:
+            (should_stop, reason)
+        """
+        # Kriter 1: Çakışma yok ve yeterince iterasyon yapıldı
+        if conflicts == 0:
+            return True, "Çakışma=0"
+        
+        # Kriter 2: Çok düşük sıcaklık, artık değişim yok
+        if temperature < 100.0 and self.check_convergence(cost_history):
+            return True, "Düşük sıcaklık ve converged"
+        
+        # Kriter 3: Stuck in local optimum (aynı maliyet uzun süre)
+        if len(cost_history) > 300:
+            last_300 = cost_history[-300:]
+            unique_costs = len(set(round(c, 1) for c in last_300))
+            if unique_costs < 5:  # Sadece 5 farklı maliyet değeri
+                return True, "Yerel optimumda takıldı"
+        
+        return False, ""
+    
     def optimize(self, initial_paths: List[List[Tuple[int, int]]], 
                 agents_info: List[Tuple[Tuple[int, int], Tuple[int, int]]],
-                verbose: bool = True) -> Tuple[List[List[Tuple[int, int]]], List[float]]:
+                verbose: bool = True, early_stopping: bool = True,
+                patience: int = 500) -> Tuple[List[List[Tuple[int, int]]], List[float]]:
 
         current_solution = copy.deepcopy(initial_paths)
         current_cost = self.calculate_cost(current_solution)
@@ -207,6 +261,7 @@ class SimulatedAnnealingMAPF:
         cost_history = [current_cost]
         
         iteration = 0
+        iterations_without_improvement = 0
         
         if verbose:
             print(f"Başlangıç maliyeti: {current_cost:.2f}")
@@ -226,21 +281,54 @@ class SimulatedAnnealingMAPF:
                 if delta < 0 or random.random() < math.exp(-delta / temperature):
                     current_solution = neighbor
                     current_cost = neighbor_cost
-
-                elif random.random() < math.exp(-delta / temperature): 
-                    current_solution = neighbor
-                    current_cost = neighbor_cost
                     
                     # En iyi çözümü güncelle
-                if current_cost < best_cost:
-                    best_solution = copy.deepcopy(current_solution)
-                    best_cost = current_cost
-                    if verbose:
-                        conflicts = len(self.detect_conflicts(best_solution))
-                        print(f"İter {iteration}: Yeni en iyi maliyet={best_cost:.2f}, Çakışma={conflicts}, Temp={temperature:.2f}")
+                    if current_cost < best_cost:
+                        best_solution = copy.deepcopy(current_solution)
+                        best_cost = current_cost
+                        iterations_without_improvement = 0  # Reset
+                        
+                        if verbose:
+                            conflicts = len(self.detect_conflicts(best_solution))
+                            print(f"İter {iteration}: Yeni en iyi maliyet={best_cost:.2f}, Çakışma={conflicts}, Temp={temperature:.2f}")
+                    else:
+                        iterations_without_improvement += 1
+                else:
+                    iterations_without_improvement += 1
                 
-                iteration += 1 #toplam iterasyon sayısı
+                iteration += 1
                 cost_history.append(current_cost)
+
+                if self.enable_adaptive_stopping and iteration % 250 == 0:
+                    conflicts = len(self.detect_conflicts(best_solution))
+                    should_stop, reason = self.adaptive_early_stopping_check(
+                        conflicts,
+                        temperature,
+                        cost_history
+                    )
+                    
+                    if should_stop:
+                        if verbose:
+                            print(f"\nADAPTIVE EARLY STOPPING!")
+                            print(f"   Sebep: {reason}")
+                            print(f"   Toplam iterasyon: {iteration}")
+                            print(f"   Final maliyet: {best_cost:.2f}")
+                            print(f"   Kalan sıcaklık: {temperature:.2f}")
+                        
+                        return best_solution, cost_history
+                    
+                if early_stopping and iterations_without_improvement >= patience:
+                    conflicts = len(self.detect_conflicts(best_solution))
+                    
+                    # Eğer çakışma yoksa, dur
+                    if conflicts == 0:
+                        if verbose:
+                            print(f"\n⏹️  EARLY STOPPING!")
+                            print(f"   {patience} iterasyon iyileşme yok, çakışma=0")
+                            print(f"   Toplam iterasyon: {iteration}")
+                            print(f"   Kalan sıcaklık: {temperature:.2f}")
+                        
+                        return best_solution, cost_history
             
             # soğutma
             temperature *= self.cooling_rate

@@ -9,6 +9,9 @@ from metrics_visualization import (
     plot_soc_over_time,
     plot_auc_over_time
 )
+from dijkstra import DijkstraPathFinder
+from ai_pathfinder import AIPathFinder
+
 
 def read_map_file(filename: str) -> List[List[str]]:
     """
@@ -148,7 +151,7 @@ def calculate_path_cost(path: List[Tuple[int, int]]) -> float:
     return total_cost
 
 
-def save_solution(filename: str, paths: List[List[Tuple[int, int]]], time_elapsed: float) -> None:
+def save_solution(filename: str, paths: List[List[Tuple[int, int]]], time_elapsed: float, conflicts: int) -> None:
     """Çözümü dosyaya kaydeder"""
     # Her agent için maliyetleri hesapla
     individual_costs = [calculate_path_cost(path) for path in paths]
@@ -159,6 +162,7 @@ def save_solution(filename: str, paths: List[List[Tuple[int, int]]], time_elapse
     with open(filename, 'w') as f:
         f.write(f"Agents: {len(paths)}\n")
         f.write(f"Time elapsed: {time_elapsed:.2f} seconds\n")
+        f.write(f"Conflicts: {conflicts}\n")
         f.write(f"Makespan: {max(len(p) for p in paths)}\n")
         f.write(f"Sum of costs (steps): {sum(len(p) - 1 for p in paths)}\n")
         f.write(f"Sum of costs (actual): {total_sum_of_costs:.5f}\n")
@@ -305,8 +309,12 @@ def main():
     
     # A* ile başlangıç yollarını bul
     #print(f"\n3. A* ile başlangıç yolları bulunuyor...")
-    pathfinder = AStarPathFinder(grid)
-    initial_paths = pathfinder.find_initial_paths(agents)
+    #pathfinder = AStarPathFinder(grid)
+    #pathfinder = DijkstraPathFinder(grid)
+    #initial_paths = pathfinder.find_initial_paths(agents)
+
+    pathfinder = AIPathFinder(grid, model_path="models/ai_pathfinder.pth")
+    initial_paths = pathfinder.find_initial_paths(grid, agents)
     
     initial_cost = sum(len(p) for p in initial_paths)
     print(f"Toplam başlangıç maliyeti: {initial_cost}")
@@ -320,13 +328,16 @@ def main():
         cooling_rate=0.995,
         min_temp=1.0,
         conflict_penalty=1000.0,
-        iterations_per_temp=100
+        iterations_per_temp=100,
+        enable_adaptive_stopping=True
     )
     
     optimized_paths, cost_history = sa_optimizer.optimize(
         initial_paths, 
         agents,
-        verbose=True
+        verbose=True,
+        early_stopping=True,
+        patience=500    
     )
 
     """results = []
@@ -348,6 +359,7 @@ def main():
     print(f"Çözüm süresi: {time_elapsed:.2f} saniye")
 
     conflicts = sa_optimizer.detect_conflicts(optimized_paths)
+    conflict_count = len(conflicts)
     makespan = max(len(p) for p in optimized_paths)
     sum_of_costs_steps = sum(len(p) - 1 for p in optimized_paths)  # Adım sayısı
     sum_of_costs_actual = sum(calculate_path_cost(p) for p in optimized_paths)  # Gerçek maliyet
@@ -371,8 +383,8 @@ def main():
             print(f"  ... ve {len(conflicts) - 10} çakışma daha")
     
     # Çözümü kaydet
-    output_file = "solutions/solution_maze_1.txt"
-    save_solution(output_file, optimized_paths, time_elapsed)
+    output_file = "solutions/solution_maze_ai.txt"
+    save_solution(output_file, optimized_paths, time_elapsed, conflict_count)
     print(f"\nÇözüm '{output_file}' dosyasına kaydedildi.")
     
     # Grafikleri çiz
@@ -384,9 +396,9 @@ def main():
     plot_all_metrics(optimized_paths, output_dir="metrics_plots_maze", show=False)
     
     # SA convergence grafiği
-    plot_sa_convergence(cost_history, save_path="metrics_plots_maze/sa_convergence.png", show=False)
+    plot_sa_convergence(cost_history, save_path="metrics_plots_maze_ai/sa_convergence.png", show=False)
 
-    print("\nTüm grafikler 'metrics_plots_maze/' klasörüne kaydedildi!")
+    print("\nTüm grafikler 'metrics_plots_maze_ai/' klasörüne kaydedildi!")
     
 
 if __name__ == "__main__":
